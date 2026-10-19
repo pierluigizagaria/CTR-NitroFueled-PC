@@ -785,6 +785,11 @@ void SyncOnlineBuffers() {
 
 std::string CurrentNick() { return Trim(g_app.game.Get("online_name", g_app.game.Get("user_name"))); }
 
+bool ExternalPsnBackend() {
+    // The runtime validates the library and its ABI. Never load it in both launcher and game.
+    return GetEnvironmentVariableW(L"BB_PSN_BACKEND", nullptr, 0) > 1;
+}
+
 /// The server derives the player's ID from the nickname, so everyone left on the old default
 /// (RyuPC) was ONE player online: one wallet, and matchmaking evicting each other. These names
 /// are refused; run.py refuses them too.
@@ -980,6 +985,7 @@ std::string ProofHeader(const std::string& key_hash, const char* method, const s
 /// The body, or "" when the server could not be reached. Called from background threads.
 std::string HttpRequest(const std::string& server, const wchar_t* method, const std::wstring& path,
                         const std::string& form = {}, int timeout_ms = 3000, bool register_key = false) {
+    if (ExternalPsnBackend()) return {};
     std::string host;
     INTERNET_PORT port = 0;
     SplitServer(server, host, port);
@@ -1067,6 +1073,7 @@ NickCheck::Result AskNickStatus(const std::string& server, const std::string& ni
 /// Cached answer for the current nickname, asking the server in the background once per
 /// nickname. "?" while the question is out.
 std::string NickAvailability() {
+    if (ExternalPsnBackend()) return "";
     const std::string nick = CurrentNick();
     const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
     if (NickProblem(nick) || server.empty()) return "";
@@ -1090,6 +1097,7 @@ std::string NickAvailability() {
 /// Whether the server can link Discord accounts, asked once in the background without a
 /// nickname (a reinstalled launcher has none yet).
 bool DiscordLinkAvailable() {
+    if (ExternalPsnBackend()) return false;
     const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
     if (server.empty()) return false;
     const std::string id = server + "|*";
@@ -1227,6 +1235,7 @@ struct NatState {
 NatState g_nat;
 
 void StartNatCheck(const std::string& server) {
+    if (ExternalPsnBackend()) return;
     {
         std::scoped_lock lock{g_nat.mutex};
         if (g_nat.running) return;
@@ -1245,6 +1254,10 @@ void StartNatCheck(const std::string& server) {
 /// Short label and colour for the Play page ("NAT: type 2 (moderate)"); starts the first test
 /// for this server.
 std::string NatLabel(const std::string& server, ImVec4& color) {
+    if (ExternalPsnBackend()) {
+        color = kGrey;
+        return T("Backend PSN externo", "External PSN backend");
+    }
     bool running, done;
     std::string checked;
     NatCheck::Result r;
@@ -1557,7 +1570,9 @@ void UpdateDiscord() {
         return;
     }
     DiscordPresence::Activity activity;
-    if (a.game.Flag("online", true)) {
+    if (ExternalPsnBackend()) {
+        activity.details = T("Jugando", "Playing");
+    } else if (a.game.Flag("online", true)) {
         activity.details = T("Jugando online", "Playing online");
         const std::string nick = CurrentNick();
         if (!nick.empty()) activity.state = std::string(T("Apodo: ", "Nickname: ")) + nick;
@@ -1590,6 +1605,7 @@ void UpdateDiscord() {
 /// discord-<app id> URL protocol, registered for the current user as Discord's own SDKs do.
 /// Written on every start, so a portable folder that moved points at its new place.
 void RegisterDiscordLaunch(const std::string& app_id) {
+    if (ExternalPsnBackend()) return;
     if (app_id.empty() || app_id.find_first_not_of("0123456789") != std::string::npos) return;
     wchar_t exe[MAX_PATH];
     const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
@@ -1613,7 +1629,7 @@ void RegisterDiscordLaunch(const std::string& app_id) {
 /// What the PLAY button does: online without a usable nickname asks for one first (NickPopup).
 void PressPlay() {
     App& a = g_app;
-    if (a.game.Flag("online", true) && (NickProblem(CurrentNick()) || NickTaken())) a.ask_nick = true;
+    if (!ExternalPsnBackend() && a.game.Flag("online", true) && (NickProblem(CurrentNick()) || NickTaken())) a.ask_nick = true;
     else StartGame();
 }
 
@@ -1636,6 +1652,7 @@ std::string Format(const char* format, const std::string& a, const std::string& 
 /// An invite accepted in Discord, for a server we use (or agreed to switch to): the host
 /// becomes a friend (the game lists friends' lobbies as joinable) and the game starts.
 void AcceptDiscordJoin(const std::string& server, const std::string& nick) {
+    if (ExternalPsnBackend()) return;
     App& a = g_app;
     a.game.Set("online", "1");
     a.game.Set("online_server", server);
@@ -1675,6 +1692,7 @@ void AcceptDiscordJoin(const std::string& server, const std::string& nick) {
 
 /// A join secret from Discord: "ctr1|<server>|<nickname>", written by UpdateDiscord.
 void OnDiscordJoin(const std::string& secret) {
+    if (ExternalPsnBackend()) return;
     App& a = g_app;
     const auto p1 = secret.find('|');
     const auto p2 = p1 == std::string::npos ? p1 : secret.find('|', p1 + 1);
@@ -1781,6 +1799,7 @@ struct AnnouncePoll {
 AnnouncePoll g_announce;
 
 void PollAnnouncement() {
+    if (ExternalPsnBackend()) return;
     App& a = g_app;
     if (!a.game.Flag("online", true)) return;
     const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
@@ -1819,7 +1838,7 @@ void PollJobs() {
     UpdateDiscord();
     ApplyRecoveredNick();
     PollAnnouncement();
-    DiscordPresence::SetAcceptJoinRequests(a.launcher.Flag("discord_accept_requests", true));
+    DiscordPresence::SetAcceptJoinRequests(!ExternalPsnBackend() && a.launcher.Flag("discord_accept_requests", true));
     for (std::string secret; DiscordPresence::TakeJoin(secret);) OnDiscordJoin(secret);
     if (a.pending_play && !a.game_running && GameReady()) {
         a.pending_play = false;
@@ -2428,7 +2447,10 @@ void PlayTab() {
             ImGui::TextColored(kYellow, "%s", T("Comprobando el juego...", "Checking the game..."));
         } else if (a.game_ok) {
             ImGui::TextColored(kGreen, "%s %s", T("Listo:", "Ready:"), Describe(a.game_info).c_str());
-            if (a.game.Flag("online", true)) {
+            if (ExternalPsnBackend()) {
+                ImGui::TextColored(kGrey, "%s", T("El backend PSN seleccionado gestiona la identidad, amigos e invitaciones.",
+                                                  "The selected PSN backend manages identity, friends and invitations."));
+            } else if (a.game.Flag("online", true)) {
                 std::string srv = a.game.Get("online_server", "octr.ryu7w7.xyz");
                 if (srv.empty()) srv = "octr.ryu7w7.xyz";
                 const std::string nick = CurrentNick().empty() ? std::string("-") : CurrentNick();
@@ -2998,6 +3020,7 @@ DiscordLinkState g_discord_link;
 enum class DiscordLinkMode { Link, Unlink, Recover };
 
 void StartDiscordLink(DiscordLinkMode mode) {
+    if (ExternalPsnBackend()) return;
     const bool unlink = mode == DiscordLinkMode::Unlink;
     App& a = g_app;
     const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
@@ -3166,6 +3189,7 @@ void ApplyRecoveredNick() {
 
 /// Under the nickname: its Discord account, and Link / Recover / Unlink.
 void DiscordAccountSection() {
+    if (ExternalPsnBackend()) return;
     if (NickProblem(CurrentNick())) {
         DiscordRecoverOffer();
         return;
@@ -3233,6 +3257,7 @@ void DiscordAccountSection() {
 }
 
 void NatTypeSection(const std::string& server) {
+    if (ExternalPsnBackend()) return;
     bool running, done;
     NatCheck::Result result;
     {
@@ -3301,8 +3326,13 @@ void NatTypeSection(const std::string& server) {
 
 void OnlineTab() {
     App& a = g_app;
-    ImGui::TextColored(kGrey, "%s", T("Juego online con un servidor RyuNET. Se aplica al pulsar Jugar.",
-                                      "Online play through a RyuNET server. Applied when you press Play."));
+    if (ExternalPsnBackend()) {
+        ImGui::TextWrapped("%s", T("El backend PSN seleccionado gestiona la identidad, amigos e invitaciones. El servidor del editor se configura por separado.",
+                                   "The selected PSN backend manages identity, friends and invitations. The publisher server is configured separately."));
+    } else {
+        ImGui::TextColored(kGrey, "%s", T("Juego online con un servidor RyuNET. Se aplica al pulsar Jugar.",
+                                          "Online play through a RyuNET server. Applied when you press Play."));
+    }
 
     ImGui::SeparatorText(T("Servidor", "Server"));
     {
@@ -3354,7 +3384,7 @@ void OnlineTab() {
         // unlinking it first (DiscordAccountSection), not by typing over it.
         const NickCheck::Result nick_info = NickInfo();
         const bool nick_locked = nick_info.status == "yours" && nick_info.linked;
-        ImGui::BeginDisabled(nick_locked);
+        ImGui::BeginDisabled(nick_locked || ExternalPsnBackend());
         NickInput(T("Apodo (Nickname)", "Nickname"));
         if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
         ImGui::EndDisabled();
@@ -3367,7 +3397,7 @@ void OnlineTab() {
                            "distinta en el servidor (monedas, objetos del Pit Stop), así que no uses el de otra persona.",
                            "Your online name, required: 3 to 16 letters, digits, _ or -. Each nickname is a separate account "
                            "on the server (coins, Pit Stop items), so do not use someone else's."));
-        if (const char* problem = NickProblem(CurrentNick())) {
+        if (const char* problem = ExternalPsnBackend() ? nullptr : NickProblem(CurrentNick())) {
             ImGui::TextColored(kYellow, "%s", problem);
             if (a.game.Flag("online", true)) DiscordRecoverOffer();
         } else if (a.game.Flag("online", true)) {
@@ -3375,10 +3405,12 @@ void OnlineTab() {
             DiscordAccountSection();
         }
 
-        // Friends: the in-game menu's Friends tab (Insert / L3+R3) finds, adds and invites them;
-        // the names of the old Friends field (online_friends) get friend requests once.
-        ImGui::TextColored(kGrey, "%s", T("Amigos: dentro del juego, menú (Insert / L3+R3) > Amigos.",
-                                          "Friends: in the game, menu (Insert / L3+R3) > Friends."));
+        if (!ExternalPsnBackend()) {
+            // Friends: the in-game menu's Friends tab (Insert / L3+R3) finds, adds and invites them;
+            // the names of the old Friends field (online_friends) get friend requests once.
+            ImGui::TextColored(kGrey, "%s", T("Amigos: dentro del juego, menú (Insert / L3+R3) > Amigos.",
+                                              "Friends: in the game, menu (Insert / L3+R3) > Friends."));
+        }
 
         // Which Pit Stop items (characters, skins, karts) count as yours online: the server's,
         // bought with coins and tied to the nickname, or the save's (run.py sends it at login).

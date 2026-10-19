@@ -38,6 +38,7 @@ import discord_ipc  # noqa: E402
 import discord_oauth  # noqa: E402
 import ryunet_http  # noqa: E402
 import appimage_update  # noqa: E402
+from run import external_psn_backend  # noqa: E402
 
 PACKAGED = bool(os.environ.get("BB_PREBUILT"))
 
@@ -606,10 +607,13 @@ def import_saves(user_dir, source):
     return ""
 
 
-def discord_activity_for(ini, started, party):
+def discord_activity_for(ini, started, party, external=None):
     """What Discord shows while the game runs, from bbport.ini: online with the nickname and a
     joinable party (the Windows launcher's), or offline. party: (players, max) of the lobby the
     player hosts, None when unknown."""
+    if (external_psn_backend() if external is None else external):
+        return discord_ipc.Activity(tr("Playing"), start=started, large_image="logo",
+                                    large_text="Crash Team Racing Nitro-Fueled")
     nick, server = ini.get("online_name", "").strip(), ini.get("online_server", ONLINE_SERVER).strip()
     if ini.get("online") != "1":
         return discord_ipc.Activity(tr("Playing offline"), start=started, large_image="logo",
@@ -634,11 +638,14 @@ def parse_join_secret(secret):
     return parts[1], parts[2]
 
 
-def apply_join(server, nick):
+def apply_join(server, nick, external=None):
     """An accepted invite: the host becomes a friend (the game lists friends' lobbies as
     joinable), online on that server, and the game joins their session by itself, as a PS4
     invitation accepted in the system UI (src/runtime_services.c reads ryunet_join.txt next to
-    bbport.ini, also while it runs). Returns the friends list written."""
+    bbport.ini, also while it runs). Returns the friends list written, or None for an external
+    backend, whose invitations and identity are not controlled by RyuNET."""
+    if (external_psn_backend() if external is None else external):
+        return None
     ini, lines = load_ini()
     friends = [f.strip() for f in ini.get("online_friends", "").split(",") if f.strip()]
     if nick.lower() not in [f.lower() for f in friends]:
@@ -784,6 +791,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         set_language(self.settings.get("ui_language", ""))
         self.ini, self.ini_lines = load_ini()
         self.process = None
+        self.running_external_backend = False
         self.stream = None
         self.game_started = 0  # Unix time the game started, for Discord's "elapsed"
         self.presence = discord_ipc.Presence()
@@ -1946,6 +1954,11 @@ class LauncherWindow(Adw.ApplicationWindow):
     def server(self):
         return self.server_row.get_text().strip() or ONLINE_SERVER
 
+    def external_backend(self):
+        # Settings can be edited while playing; invitation routing belongs to the running session.
+        return (self.running_external_backend if self.process is not None else
+                external_psn_backend(self.environment()))
+
     def nick(self):
         return self.nick_row.get_text().strip()
 
@@ -1970,6 +1983,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.nick_timer = GLib.timeout_add(700, ask)
 
     def ask_nick_status(self):
+        if self.external_backend():
+            self.nick_info = {}
+            self.show_nick_status()
+            return
         server, nick = self.server(), self.nick()
         asked = f"{server}|{nick}"
         self.nick_asked = asked
@@ -1988,7 +2005,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         status = (info or {}).get("status", "")
         linked = bool(info and info.get("linked"))
         ban = (info or {}).get("banned")
-        if ban:
+        if self.external_backend():
+            text = tr("The selected PSN backend manages identity, friends and invitations.")
+            link_available = False
+        elif ban:
             until = (info or {}).get("ban_until") or 0
             text = " ".join((
                 tr("Your connection (IP) is banned from online play.") if (info or {}).get("ban_kind") == "ip"
@@ -2031,7 +2051,7 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def start_discord_link(self, mode):
         """mode: "link" this nickname, or "recover" the one linked to the Discord account."""
-        if self.discord_busy:
+        if self.external_backend() or self.discord_busy:
             return
         self.store()
         server, app_id = self.server(), self.discord_app_id()
@@ -2104,6 +2124,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         return tr("The server could not confirm the account with Discord. Try again."), ""
 
     def confirm_discord_unlink(self):
+        if self.external_backend():
+            return
         server, nick = self.server(), self.nick()
 
         def unlink():
@@ -2120,12 +2142,12 @@ class LauncherWindow(Adw.ApplicationWindow):
         """What Discord shows while the game runs; joinable online (the Windows launcher's)."""
         if self.process is None:
             return None
-        return discord_activity_for(self.ini, self.game_started, self.party)
+        return discord_activity_for(self.ini, self.game_started, self.party, self.external_backend())
 
     def poll_party(self):
         """The lobby this player hosts, every 5 s while the game runs online: Discord's
         "1 of 8" follows players joining and leaving."""
-        if self.process is None or self.ini.get("online") != "1" or self.party_busy:
+        if self.external_backend() or self.process is None or self.ini.get("online") != "1" or self.party_busy:
             return
         if time.monotonic() - self.party_asked < 5:
             return
@@ -2141,7 +2163,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         """Server announcements ("maintenance in 5 minutes"), every 30 s while online play is on:
         a new one goes to the game in ryunet_announce.txt next to bbport.ini (drawn over the
         picture) and to a toast."""
-        if self.ini.get("online") != "1" or self.announce_busy or time.monotonic() - self.announce_asked < 30:
+        if self.external_backend() or self.ini.get("online") != "1" or self.announce_busy or time.monotonic() - self.announce_asked < 30:
             return
         self.announce_busy, self.announce_asked = True, time.monotonic()
         server = self.ini.get("online_server", ONLINE_SERVER)
@@ -2157,6 +2179,8 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def on_discord_join(self, secret):
         """A join secret from Discord: "ctr1|<server>|<nickname>"."""
+        if self.external_backend():
+            return
         parsed = parse_join_secret(secret)
         if not parsed:
             self.toasts.add_toast(Adw.Toast(title=tr("That Discord invite is not from this launcher.")))
@@ -2178,7 +2202,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         """The host becomes a friend (the game lists friends' lobbies as joinable) and the game
         joins their session by itself, as a PS4 invitation accepted in the system UI
         (src/runtime_services.c reads ryunet_join.txt next to bbport.ini)."""
-        apply_join(server, nick)
+        friends = apply_join(server, nick, self.external_backend())
+        if friends is None:
+            return
         self.ini, self.ini_lines = load_ini()
         self.online_row.set_active(True)
         self.server_row.set_text(server)
@@ -2194,7 +2220,7 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def tick(self):
         """Every second: Discord's presence and its invites, the party size, announcements."""
-        self.presence.accept_requests = self.settings.get("discord_accept_requests", True)
+        self.presence.accept_requests = not self.external_backend() and self.settings.get("discord_accept_requests", True)
         self.presence.update(self.settings.get("discord_rpc", True), self.discord_app_id(), self.discord_activity())
         while (secret := self.presence.take_join()) is not None:
             self.on_discord_join(secret)
@@ -2335,7 +2361,9 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.stop_game()
             return
         self.store()
-        if self.ini.get("online") == "1" and not nick_ok(self.ini.get("online_name", "")):
+        env = self.environment()
+        external = external_psn_backend(env)
+        if not external and self.ini.get("online") == "1" and not nick_ok(self.ini.get("online_name", "")):
             self.toasts.add_toast(Adw.Toast(title=tr("Online play needs your own nickname (3-16 letters, digits, _ or -; not RyuPC or Player)"),
                                             timeout=8))
             return
@@ -2343,10 +2371,11 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.issue_notice.set_visible(False)
         launcher = Gio.SubprocessLauncher.new(
             Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE)
-        launcher.set_environ([f"{k}={v}" for k, v in self.environment().items()])
+        launcher.set_environ([f"{k}={v}" for k, v in env.items()])
         launcher.set_cwd(str(PORT_DIR))
         try:
             self.process = launcher.spawnv(["setsid", "bash", str(PORT_DIR / "run.sh")])
+            self.running_external_backend = external
         except GLib.Error as error:
             self.toasts.add_toast(Adw.Toast(title=tr("Could not start: {}").format(error.message)))
             return
@@ -2447,6 +2476,7 @@ def play():
         return 1
     os.chdir(PORT_DIR)
     env = game_environment(settings)
+    external = external_psn_backend(env)
     steam_shortcuts.stable_appimage_link()
     if not settings.get("discord_rpc", True):
         os.execvpe("bash", ["bash", str(PORT_DIR / "run.sh")], env)  # nothing to do alongside
@@ -2463,7 +2493,7 @@ def play():
 
     import threading
     presence = discord_ipc.Presence()
-    presence.accept_requests = settings.get("discord_accept_requests", True)
+    presence.accept_requests = not external and settings.get("discord_accept_requests", True)
     app_id = settings.get("discord_app_id") or DISCORD_APP_ID
     started = int(time.time())
     state = {"party": None, "party_at": 0.0, "announce_at": 0.0, "seen": "", "busy": set()}
@@ -2482,10 +2512,12 @@ def play():
 
     while child.poll() is None:
         ini, _lines = load_ini()
-        online = ini.get("online") == "1"
+        online = not external and ini.get("online") == "1"
         server, nick = ini.get("online_server", ONLINE_SERVER), ini.get("online_name", "")
-        presence.update(True, app_id, discord_activity_for(ini, started, state["party"]))
+        presence.update(True, app_id, discord_activity_for(ini, started, state["party"], external))
         while (secret := presence.take_join()) is not None:
+            if external:
+                continue
             parsed = parse_join_secret(secret)
             if not parsed or parsed[1].lower() == nick.lower():
                 continue
@@ -2494,7 +2526,7 @@ def play():
                 print(f"SacredFire: Discord invite from {parsed[1]} for another server ({parsed[0]}) ignored; "
                       "accept it with the launcher open", file=sys.stderr)
                 continue
-            apply_join(*parsed)
+            apply_join(*parsed, external=external)
             print(f"SacredFire: {parsed[1]}'s Discord invite accepted: the game joins their match", file=sys.stderr)
         now = time.monotonic()
         if online and now - state["party_at"] >= 5:

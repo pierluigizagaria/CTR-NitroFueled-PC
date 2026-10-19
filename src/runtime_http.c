@@ -2,6 +2,7 @@
  * runtime_ryunet_request), which must come before any system header. */
 #include "runtime_net.h"
 #include "runtime_http.h"
+#include "runtime_psn.h"
 #include "runtime_net_overrides.h"
 #include "bb_sha256.h"
 #include <stdio.h>
@@ -454,7 +455,7 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
      * never crosses the network, and a copied signature is refused. Sent only to hosts
      * redirected to the RyuNET server, never to a real one. */
     char proof[160];
-    if (c->is_plain_http && hlen < (int)sizeof(header_buf) - 200 &&
+    if (!runtime_psn_selected() && c->is_plain_http && hlen < (int)sizeof(header_buf) - 200 &&
         runtime_ryunet_proof(method_str, r->path, proof, sizeof proof)) {
         hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Proof: %s\r\n", proof);
     }
