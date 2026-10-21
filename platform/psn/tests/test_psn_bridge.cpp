@@ -201,6 +201,8 @@ int main(int argc, char **argv) {
     invalid.body = {nullptr, 256 * 1024 + 1};
     assert(b->web_start(instance, &invalid, &request) == PSN_BACKEND_UNSUPPORTED);
     PsnInvitationRequest invite{};
+    invite.user_id = local_user;
+    invite.mode = 2;
     assert(b->invitation_start(instance, &invite, &request) == PSN_BACKEND_UNSUPPORTED);
     PsnWebRequest slow{};
     slow.user_id = local_user;

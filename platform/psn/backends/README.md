@@ -77,8 +77,8 @@ not a claim about a PSN subscription or Steam parental enforcement. Title and
 content-policy inputs are validated locally. Sony application secrets are never
 forwarded or logged. Token issuer 256 describes the local compatibility adapter,
 not Sony issuance. Authorization-code requests and invitation dialog UI return
-an explicit unsupported result. Sending/accepting through a provider overlay is
-a separate path.
+an explicit unsupported result. A guest SEND request with exactly one fixed
+recipient is supported without opening a picker, as described below.
 
 ## Lifetime and failure
 
@@ -111,3 +111,60 @@ malformed/account-change/overflow failures, credentials, redirects and endpoint
 validation, and explicit local-user mapping with IDs `70001` and `0`. These are
 offline contract checks. They do not establish Steam
 delivery, successful in-game joining or friend-page refresh in a live game.
+
+## Selected-friend invitations
+
+The guest InvitationDialog SEND action may supply exactly one selected account
+(`OpenA`) or legacy online ID (`Open`) and a canonical decimal session ID. The
+backend copies these inputs and returns an asynchronous handle. Through the
+existing WebAPI relay it reads `GET /v1/users/me/friendList`, requires one exact
+account match or one unambiguous legacy-name match, then submits
+`POST /v1/sessions/{sessionId}/invitations` with `{"to":["accountId"]}`. The
+provider owns friendship, presence, session namespace and membership validation,
+and performs the actual platform invitation. No Steam symbols or provider source
+are linked into the host; no new relay endpoint or ABI is required.
+
+Only provider success with HTTP 204 completes the guest result successfully and
+returns the resolved recipient. This confirms dispatch, not remote delivery or
+acceptance. Missing/ambiguous recipients, incomplete snapshots, provider/HTTP
+errors and lost responses complete with an error and no confirmed recipient.
+The mutation is never automatically retried. Cancel before mutation suppresses
+the send; cancel after dispatch cannot retract an invitation already issued by
+the provider. Release waits until the worker stops using the request.
+
+Empty selection/picker requests, receive dialogs, multiple recipients and custom
+messages remain explicitly unsupported. No dialog selection or successful send
+is fabricated from opening or closing the Steam overlay. Fixed-recipient fixture
+tests cover copied inputs, both API identity forms, guest OpenA/results, numeric
+names, absent/ambiguous recipients, failures, active cancellation and a lost
+mutation response. These checks do not establish live platform delivery.
+
+## Optional timing diagnostics
+
+Set `PSN_BRIDGE_TRACE_TIMING=1` in the environment before starting the
+supervised session to emit timing records to the host's stderr log. Only the
+exact value `1` enables this mode; it is off by default. No configuration or
+protocol fields change.
+
+The records contain monotonic milliseconds since backend initialization and
+fixed operation categories. They never contain paths, queries, account or
+session IDs, names, authorization headers, tokens or request/response bodies.
+Only accepted invitations and WebAPI completions are logged:
+
+- `invitation_received`: the backend validated and queued an accepted
+  invitation from the relay; `fetch_ms` covers that local HTTP event read.
+- `invitation_to_host`: `event_next` returned the event to the host;
+  `queue_ms` measures its wait inside this backend.
+- `web_complete`: the host first consumed a completed WebAPI result.
+  `queue_ms` covers waiting for the request worker, `service_ms` covers the
+  request work until completion or cancellation, and `consume_ms` covers
+  the retained result's wait for its first poll. Status and HTTP code are numeric.
+  Repeated polls of the same result do not duplicate this record.
+
+These measurements do not show Steam's callback, lobby validation or session
+blob transfer before the accepted event reaches the relay. Delivery to the
+host is also distinct from the game's later SystemService event consumption
+and actual lobby entry. The WebAPI service duration includes the relay/provider
+work without attributing it to an internal phase. This diagnostic does not
+change polling intervals, joins or timeouts, and does not establish gameplay
+latency by itself.
