@@ -32,4 +32,23 @@ if(PSN_HOST_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/../tests/bridge_http_fixture.py
         $<TARGET_FILE:psn-bridge-test> $<TARGET_FILE:psn-bridge-backend>)
     set_tests_properties(psn-bridge-http PROPERTIES TIMEOUT 40)
+    add_executable(psn-invitation-test ../tests/test_psn_invitation.cpp)
+    set_target_properties(psn-invitation-test PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    target_link_libraries(psn-invitation-test PRIVATE psn-host nlohmann_json::nlohmann_json)
+    target_compile_options(psn-invitation-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    add_test(NAME psn-bridge-invitation COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests/invitation_http_fixture.py
+        $<TARGET_FILE:psn-invitation-test> $<TARGET_FILE:psn-bridge-backend>)
+    set_tests_properties(psn-bridge-invitation PROPERTIES TIMEOUT 50)
+endif()
+
+if(PSN_HOST_TESTS)
+    add_executable(psn-timing-test ../tests/test_psn_timing.cpp)
+    set_target_properties(psn-timing-test PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    target_link_libraries(psn-timing-test PRIVATE psn-host nlohmann_json::nlohmann_json)
+    target_compile_options(psn-timing-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    add_test(NAME psn-bridge-timing COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests/timing_http_fixture.py
+        $<TARGET_FILE:psn-timing-test> $<TARGET_FILE:psn-bridge-backend>)
+    set_tests_properties(psn-bridge-timing PROPERTIES TIMEOUT 30)
 endif()

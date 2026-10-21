@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <curl/curl.h>
 #include <deque>
@@ -19,11 +20,13 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 namespace {
 using Json = nlohmann::json;
+using Clock = std::chrono::steady_clock;
 constexpr size_t body_limit = 256 * 1024, wire_limit = 1024 * 1024;
 constexpr size_t event_limit = 1024, job_limit = 128;
 struct Invalid : std::runtime_error {
@@ -112,13 +115,20 @@ int32_t status(int32_t s) {
     }
 }
 struct Job {
-    bool auth = false, active = false, done = false;
+    enum Kind { web, auth, invitation } kind = web;
+    bool active = false, done = false;
     std::atomic<bool> canceled{false};
     Json request;
     PsnAuthResult auth_result{};
+    PsnInvitationUser recipient{};
+    PsnInvitationResult invitation_result{};
+    std::string session;
     int32_t result = 0, http = 0;
     std::string body, content_type;
     PsnHeader header{};
+    Clock::time_point queued_at{}, started_at{}, completed_at{};
+    const char *timing_class = "other";
+    bool timing_logged = false;
 };
 struct Subscription {
     uint32_t kind, label;
@@ -127,6 +137,7 @@ struct Subscription {
 };
 struct Event {
     PsnEvent value{};
+    Clock::time_point received_at{};
     bool service_present = false;
     std::string service, type, data;
     std::vector<std::pair<std::string, std::string>> values;
@@ -161,7 +172,55 @@ struct Instance {
     std::map<uint64_t, Subscription> subscriptions;
     std::deque<std::shared_ptr<Event>> events;
     std::shared_ptr<Event> borrowed;
+    bool trace_timing = false;
+    Clock::time_point timing_origin = Clock::now();
 };
+long long milliseconds(Clock::time_point from, Clock::time_point to) noexcept {
+    return std::max<long long>(0, std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count());
+}
+// Only fixed categories reach the timing log. Never emit any caller-supplied
+// path, query, account/session identifier, header, name or payload.
+const char *web_timing_class(std::string_view path, uint32_t method) noexcept {
+    path = path.substr(0, path.find('?'));
+    if (path == "/v1/sessions" && method == 1)
+        return "session_create";
+    constexpr std::string_view prefix = "/v1/sessions/";
+    if (!path.starts_with(prefix))
+        return "other";
+    path.remove_prefix(prefix.size());
+    auto end = path.find('/');
+    auto session = path.substr(0, end);
+    if (session.empty() || session.find_first_not_of("0123456789") != session.npos)
+        return "other";
+    auto suffix = end == path.npos ? std::string_view{} : path.substr(end);
+    if (suffix.empty())
+        return method == 0 ? "session_read" : method == 3 ? "session_delete" : "session_update";
+    if (suffix == "/members")
+        return method == 1 ? "membership_add" : "members";
+    if (suffix.starts_with("/members/") && method == 3)
+        return "membership_leave";
+    if (suffix == "/sessionData")
+        return "session_data";
+    if (suffix == "/changeableSessionData")
+        return "session_changeable_data";
+    if (suffix == "/sessionImage")
+        return "session_image";
+    if (suffix == "/invitations")
+        return "session_invitations";
+    return "other";
+}
+void trace_web_completion(Instance &i, Job &job) noexcept {
+    if (!i.trace_timing || job.timing_logged)
+        return;
+    job.timing_logged = true;
+    const auto now = Clock::now();
+    const auto started = job.started_at == Clock::time_point{} ? job.completed_at : job.started_at;
+    std::fprintf(stderr,
+        "PSN timing: web_complete t_ms=%lld class=%s queue_ms=%lld service_ms=%lld consume_ms=%lld result=%d http=%d\n",
+        milliseconds(i.timing_origin, now), job.timing_class,
+        milliseconds(job.queued_at, started), milliseconds(started, job.completed_at),
+        milliseconds(job.completed_at, now), job.result, job.http);
+}
 struct Transfer {
     Instance *instance;
     Job *job;
@@ -196,6 +255,8 @@ struct Reply {
     Json json;
 };
 Reply http(Instance &i, const std::string &path, const Json *body = nullptr, Job *job = nullptr) {
+    if (i.stopping || (job && job->canceled))
+        return {CURLE_ABORTED_BY_CALLBACK, 0, {}};
     std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
     require(curl != nullptr);
     Transfer transfer{&i, job, {}, false};
@@ -238,6 +299,79 @@ Reply http(Instance &i, const std::string &path, const Json *body = nullptr, Job
     }
     return {result, code, std::move(parsed)};
 }
+Json invitation_web(const char *method, const char *group, const std::string &path,
+                    const std::string &body = {}) {
+    return {{"method", method}, {"api_group", group}, {"path", path},
+            {"content_type", "application/json"}, {"headers", Json::object()},
+            {"bodyHex", hex({body.data(), body.size()})}};
+}
+void send_invitation(Instance &i, Job &job, Job &result) {
+    // The guest already selected one recipient. Resolve its copied identity
+    // through the provider's ordinary friend snapshot; never open another picker.
+    auto lookup = invitation_web("GET", "friendList", "/v1/users/me/friendList");
+    auto reply = http(i, "/psn/v1/webapi", &lookup, &job);
+    if (reply.transport != CURLE_OK || reply.http != 200) {
+        result.result = PSN_BACKEND_UNAVAILABLE;
+        return;
+    }
+    result.result = status(integer(reply.json.at("status")));
+    if (result.result)
+        return;
+    if (integer(reply.json.at("httpStatus")) != 200) {
+        result.result = PSN_BACKEND_UNAVAILABLE;
+        return;
+    }
+    auto snapshot = Json::parse(unhex(reply.json.at("bodyHex")));
+    const auto &friends = snapshot.at("friendList");
+    require(friends.is_array() && friends.size() <= 5000 &&
+            number(snapshot.at("start")) == 0 && number(snapshot.at("size")) == friends.size() &&
+            number(snapshot.at("totalResults")) == friends.size());
+    std::set<uint64_t> accounts;
+    unsigned matches = 0;
+    PsnInvitationUser selected{};
+    for (const auto &entry : friends) {
+        PsnInvitationUser candidate{};
+        const auto &user = entry.at("user");
+        candidate.account_id = decimal(user.at("accountId"));
+        copy(candidate.online_id, text(user.at("onlineId"), 16, false));
+        require(accounts.insert(candidate.account_id).second);
+        if (entry.at("presence").at("onlineStatus") != "online")
+            continue;
+        if (job.recipient.account_id ? candidate.account_id == job.recipient.account_id
+                                     : !std::strcmp(candidate.online_id, job.recipient.online_id)) {
+            selected = candidate;
+            ++matches;
+        }
+    }
+    if (matches != 1) {
+        result.result = PSN_BACKEND_UNAVAILABLE;
+        return;
+    }
+    // Cancel between the read and mutation must not submit an invitation.
+    // Cancellation after dispatch cannot retract a platform invitation.
+    if (i.stopping || job.canceled) {
+        result.result = PSN_BACKEND_ABORTED;
+        return;
+    }
+    const auto body = Json{{"to", {std::to_string(selected.account_id)}}}.dump();
+    auto send = invitation_web("POST", "sessionInvitation",
+                               "/v1/sessions/" + job.session + "/invitations", body);
+    reply = http(i, "/psn/v1/webapi", &send, &job);
+    // Mutations are never retried after an uncertain transport outcome.
+    if (reply.transport != CURLE_OK || reply.http != 200) {
+        result.result = PSN_BACKEND_UNAVAILABLE;
+        return;
+    }
+    result.result = status(integer(reply.json.at("status")));
+    if (result.result)
+        return;
+    if (integer(reply.json.at("httpStatus")) != 204) {
+        result.result = PSN_BACKEND_UNAVAILABLE;
+        return;
+    }
+    result.invitation_result.user_count = 1;
+    result.invitation_result.users[0] = selected;
+}
 void fail(Instance &i, int32_t error) {
     if (!i.failure)
         i.failure = error;
@@ -247,6 +381,8 @@ void fail(Instance &i, int32_t error) {
         job->canceled = true;
         if (!job->done) {
             job->done = true;
+            if (i.trace_timing)
+                job->completed_at = Clock::now();
             job->result = error;
             job->auth_result.result = error;
         }
@@ -324,6 +460,7 @@ void poll_events(Instance &i) {
             return;
         cursor = i.cursor;
     }
+    const auto fetch_started = i.trace_timing ? Clock::now() : Clock::time_point{};
     auto reply = http(i, "/psn/v1/events?after=" + std::to_string(cursor));
     if (reply.transport != CURLE_OK)
         throw std::runtime_error("transport retry");
@@ -340,6 +477,8 @@ void poll_events(Instance &i) {
             continue; // A retried response never replays a delivered invitation.
         require(sequence == cursor + 1);
         auto e = event(entry.at("event"), i.identity, i.local_user_id);
+        if (i.trace_timing && e->value.kind == 3)
+            e->received_at = Clock::now();
         if (e->value.kind == 1) {
             auto id = e->value.data.identity;
             require(id.state == 2 && id.account_id == i.identity.account_id);
@@ -363,6 +502,13 @@ void poll_events(Instance &i) {
         cursor = sequence;
     }
     i.events.insert(i.events.end(), batch.begin(), batch.end());
+    if (i.trace_timing)
+        for (const auto &e : batch)
+            if (e->value.kind == 3)
+                std::fprintf(stderr,
+                    "PSN timing: invitation_received t_ms=%lld fetch_ms=%lld\n",
+                    milliseconds(i.timing_origin, e->received_at),
+                    milliseconds(fetch_started, e->received_at));
     i.cursor = cursor;
 }
 void run(Instance &i) noexcept {
@@ -381,6 +527,8 @@ void run(Instance &i) noexcept {
                 if (found != i.jobs.end() && !found->second->done) {
                     job = found->second;
                     job->active = true;
+                    if (i.trace_timing)
+                        job->started_at = Clock::now();
                     break;
                 }
             }
@@ -390,22 +538,26 @@ void run(Instance &i) noexcept {
             // curl.
             Job result;
             try {
-                // Use the real job's atomic cancellation during the transfer.
-                auto reply = http(i, job->auth ? "/psn/v1/token" : "/psn/v1/webapi", &job->request,
-                                  job.get());
-                if (reply.transport != CURLE_OK || reply.http != 200)
-                    result.result = PSN_BACKEND_UNAVAILABLE;
-                else {
-                    auto &j = reply.json;
-                    result.result = status(integer(j.at("status")));
-                    if (job->auth && !result.result) {
-                        result.auth_result.issuer_id = integer(j.at("issuerId"));
-                        copy(result.auth_result.value, text(j.at("token"), 4096, false));
-                    } else if (!job->auth && !result.result) {
-                        result.http = integer(j.at("httpStatus"));
-                        require(result.http >= 100 && result.http <= 599);
-                        result.content_type = text(j.at("contentType"), 1024, false);
-                        result.body = unhex(j.at("bodyHex"));
+                if (job->kind == Job::invitation) {
+                    send_invitation(i, *job, result);
+                } else {
+                    // Use the real job's atomic cancellation during the transfer.
+                    auto reply = http(i, job->kind == Job::auth ? "/psn/v1/token" : "/psn/v1/webapi",
+                                      &job->request, job.get());
+                    if (reply.transport != CURLE_OK || reply.http != 200)
+                        result.result = PSN_BACKEND_UNAVAILABLE;
+                    else {
+                        auto &j = reply.json;
+                        result.result = status(integer(j.at("status")));
+                        if (job->kind == Job::auth && !result.result) {
+                            result.auth_result.issuer_id = integer(j.at("issuerId"));
+                            copy(result.auth_result.value, text(j.at("token"), 4096, false));
+                        } else if (job->kind == Job::web && !result.result) {
+                            result.http = integer(j.at("httpStatus"));
+                            require(result.http >= 100 && result.http <= 599);
+                            result.content_type = text(j.at("contentType"), 1024, false);
+                            result.body = unhex(j.at("bodyHex"));
+                        }
                     }
                 }
             } catch (...) {
@@ -416,9 +568,12 @@ void run(Instance &i) noexcept {
                 job->result = result.result;
                 job->auth_result = result.auth_result;
                 job->auth_result.result = result.result;
+                job->invitation_result = result.invitation_result;
                 job->http = result.http;
                 job->body = std::move(result.body);
                 job->content_type = std::move(result.content_type);
+                if (i.trace_timing)
+                    job->completed_at = Clock::now();
                 job->done = true;
             }
             job->active = false;
@@ -471,6 +626,8 @@ int32_t open(const char *configuration, void **out) {
         auto j = Json::parse(input(configuration, 4096, false));
         require(j.is_object() && (j.size() == 2 || (j.size() == 3 && j.contains("local_user_id"))));
         auto i = std::make_unique<Instance>();
+        const char *timing = std::getenv("PSN_BRIDGE_TRACE_TIMING");
+        i->trace_timing = timing && !std::strcmp(timing, "1");
         if (j.contains("local_user_id")) {
             i->local_user_id = integer(j.at("local_user_id"));
             require(i->local_user_id >= 0);
@@ -586,6 +743,8 @@ int32_t submit(Instance &i, std::shared_ptr<Job> job, uint64_t *out) {
     if (i.jobs.size() >= job_limit || i.next_job == UINT64_MAX)
         return PSN_BACKEND_BUSY;
     auto id = i.next_job++;
+    if (i.trace_timing)
+        job->queued_at = Clock::now();
     i.jobs.emplace(id, std::move(job));
     try {
         i.pending.push_back(id);
@@ -604,7 +763,7 @@ int32_t auth_start(void *opaque, const PsnAuthRequest *r, uint64_t *out) {
         return PSN_BACKEND_UNSUPPORTED;
     return guarded([&]() -> int32_t {
         auto job = std::make_shared<Job>();
-        job->auth = true;
+        job->kind = Job::auth;
         job->request = {{"kind", 1},
                         {"client_id", input(r->client_id, 4096, false)},
                         {"scope", input(r->scope ? r->scope : "", 4096)}};
@@ -621,7 +780,7 @@ int32_t auth_poll(void *opaque, uint64_t id, PsnAuthResult *out) {
     auto &i = *static_cast<Instance *>(opaque);
     std::lock_guard lock(i.mutex);
     auto found = i.jobs.find(id);
-    if (found == i.jobs.end() || !found->second->auth)
+    if (found == i.jobs.end() || found->second->kind != Job::auth)
         return PSN_INVALID_ARGUMENT;
     if (!found->second->done)
         return 1;
@@ -655,6 +814,7 @@ int32_t web_start(void *opaque, const PsnWebRequest *r, uint64_t *out) {
             headers[name] = value;
         }
         auto job = std::make_shared<Job>();
+        job->timing_class = web_timing_class(path, r->method);
         job->request = {{"method", methods[r->method]},
                         {"api_group", input(r->api_group, 256, false)},
                         {"path", path},
@@ -672,11 +832,12 @@ int32_t web_poll(void *opaque, uint64_t id, PsnWebResponse *out) {
     auto &i = *static_cast<Instance *>(opaque);
     std::lock_guard lock(i.mutex);
     auto found = i.jobs.find(id);
-    if (found == i.jobs.end() || found->second->auth)
+    if (found == i.jobs.end() || found->second->kind != Job::web)
         return PSN_INVALID_ARGUMENT;
     auto &job = *found->second;
     if (!job.done)
         return 1;
+    trace_web_completion(i, job);
     *out = {};
     out->result = job.result;
     out->http_status = job.http;
@@ -699,6 +860,8 @@ void cancel(void *opaque, uint64_t id) {
     auto &job = *found->second;
     job.canceled = true;
     job.done = true;
+    if (i.trace_timing)
+        job.completed_at = Clock::now();
     job.result = job.auth_result.result = PSN_BACKEND_ABORTED;
     i.wake.notify_all();
 }
@@ -761,14 +924,57 @@ int32_t event_next(void *opaque, PsnEvent *out) {
         i.events.pop_front();
         i.borrowed->bind();
         *out = i.borrowed->value;
+        if (i.trace_timing && out->kind == 3) {
+            const auto now = Clock::now();
+            std::fprintf(stderr,
+                "PSN timing: invitation_to_host t_ms=%lld queue_ms=%lld\n",
+                milliseconds(i.timing_origin, now), milliseconds(i.borrowed->received_at, now));
+        }
         return 1;
     });
 }
-int32_t invitation_start(void *, const PsnInvitationRequest *, uint64_t *) {
-    return PSN_BACKEND_UNSUPPORTED;
+int32_t invitation_start(void *opaque, const PsnInvitationRequest *r, uint64_t *out) {
+    if (!opaque || !r || !out || r->user_id != static_cast<Instance *>(opaque)->local_user_id)
+        return PSN_INVALID_ARGUMENT;
+    if (r->mode != 1 || r->user_count != 1 || r->max_selectable_users)
+        return PSN_BACKEND_UNSUPPORTED;
+    if (!r->users)
+        return PSN_INVALID_ARGUMENT;
+    return guarded([&]() -> int32_t {
+        if (!input(r->message ? r->message : "", 512).empty())
+            return PSN_BACKEND_UNSUPPORTED;
+        auto job = std::make_shared<Job>();
+        job->kind = Job::invitation;
+        job->session = input(r->session_id, 45, false);
+        // The provider's session identifiers are canonical decimal uint64 IDs;
+        // validating before path construction also excludes URL/path injection.
+        decimal(job->session);
+        job->recipient.account_id = r->users[0].account_id;
+        if (!job->recipient.account_id)
+            copy(job->recipient.online_id, input(r->users[0].online_id, 16, false));
+        return submit(*static_cast<Instance *>(opaque), job, out);
+    });
 }
-int32_t invitation_poll(void *, uint64_t, PsnInvitationResult *) { return PSN_BACKEND_UNSUPPORTED; }
-void invitation_noop(void *, uint64_t) {}
+int32_t invitation_poll(void *opaque, uint64_t id, PsnInvitationResult *out) {
+    if (!opaque || !out)
+        return PSN_INVALID_ARGUMENT;
+    auto &i = *static_cast<Instance *>(opaque);
+    std::lock_guard lock(i.mutex);
+    auto found = i.jobs.find(id);
+    if (found == i.jobs.end() || found->second->kind != Job::invitation)
+        return PSN_INVALID_ARGUMENT;
+    const auto &job = *found->second;
+    if (!job.done)
+        return 1;
+    *out = {};
+    if (job.result) {
+        out->error_code = job.result;
+        out->result = 1;
+    } else {
+        *out = job.invitation_result;
+    }
+    return 0;
+}
 const PsnBackendV1 backend{sizeof(PsnBackendV1),
                            PSN_BACKEND_ABI_V1,
                            PSN_PROFILE_SOCIAL_V1,
@@ -791,8 +997,8 @@ const PsnBackendV1 backend{sizeof(PsnBackendV1),
                            event_next,
                            invitation_start,
                            invitation_poll,
-                           invitation_noop,
-                           invitation_noop};
+                           cancel,
+                           release};
 } // namespace
 #ifdef _WIN32
 #define PSN_EXPORT __declspec(dllexport)
