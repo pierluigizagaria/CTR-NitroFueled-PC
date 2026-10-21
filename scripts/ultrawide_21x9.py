@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 from ultrawide_21x9_archive import Archive
 from ultrawide_21x9_shader import centered_shader,SIGNATURES,known_ultrawide_shader,require_warm_cache
+from ultrawide_local_shaders import update_shaders
 
 DATA=Path(__file__).resolve().parent/'ultrawide_21x9_data'
 MANIFEST=json.loads((DATA/'manifest.json').read_text(encoding='utf-8'))
@@ -289,18 +290,8 @@ def shaders(mode,user_dir,out):
   from patches import compile_external,eboot_segments
   elf=(Path(out)/'eboot.elf').read_bytes();writes=compile_external(mode.selected,eboot_segments(elf),elf)
   if len(writes)!=sum(len(list(m.iter('Line'))) for _,_,m in mode.selected):raise RuntimeError('21:9 UltraWide executable signatures do not match; launch stopped.')
- cache=Path(user_dir)/'cache'/TITLE;operations=[]
+ cache=Path(user_dir)/'cache'/TITLE
  if mode.enabled:require_warm_cache(cache)
- for shader,signature in SIGNATURES.items():
-  name=f'0x00000000{shader}_0.spv';original=(BASE_DATA/'shaders'/name).read_bytes()
-  if hashlib.sha256(original).hexdigest()!=signature:raise RuntimeError('21:9 UltraWide shader package is damaged')
-  factor=(mode.height*16/9)/mode.width if mode.enabled else 0.5
-  corrected=centered_shader(original,factor);p=cache/name
-  if p.exists():
-   current=p.read_bytes()
-   if not known_ultrawide_shader(current,original):raise RuntimeError('Another modification uses the HUD shader '+name+'; launch stopped to preserve it.')
-   desired=corrected if mode.enabled else original
-   if current!=desired:operations.append((p,desired))
-  elif mode.enabled:operations.append((p,corrected))
- # Validate both before making any writes. No stale correction remains when off.
- for p,value in operations:atomic(p,value)
+ factor=(mode.height*16/9)/mode.width if mode.enabled else 0.5
+ update_shaders(cache,Path(user_dir)/'ultrawide-shader-originals'/TITLE,mode.enabled,
+                factor,SIGNATURES,centered_shader,known_ultrawide_shader)

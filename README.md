@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/images/logo.png" alt="CTR Nitro-Fueled PC" width="360">
-</p>
-
 # CTR-NitroFueled-PC
 
 **Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11.**

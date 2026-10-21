@@ -73,6 +73,15 @@ source and notices, and retain the native package's portable Python and runtime
 dependencies. Do not include games, firmware, generated game images, user
 settings, saves, databases, credentials or runtime session capabilities.
 
+This branch also omits the upstream branded logo/icon and the original cached
+game shaders formerly bundled for ultrawide support. Ultrawide reads and checks
+the player's own warm shader cache, saving verified originals under
+`user/ultrawide-shader-originals/<title>/` before applying corrections. Both
+aspect modes share these private backups, and returning to 16:9 restores them.
+An older corrected cache without a verified original must be restored locally
+before enabling ultrawide; unknown shader modifications are preserved. A normal
+16:9 launch needs no bundled shader cache.
+
 Native and backend fixture tests validate the host/API contract. They do not
 establish successful game login, reciprocal invitations or a playable P2P race;
 those require a separate game session with the exact published package.
