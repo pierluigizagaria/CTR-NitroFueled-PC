@@ -3,6 +3,7 @@
  * menu's Friends tab asks (request, accept, decline, remove, invite, search). The tab reads a
  * copy of the latest answer; changes become notices (runtime_friends_take_event). */
 #include "runtime_friends.h"
+#include "runtime_psn.h"
 #include "runtime_http.h"
 #include "runtime_net.h"
 #include <pthread.h>
@@ -414,6 +415,7 @@ static void *friends_thread(void *arg) {
 }
 
 void runtime_friends_start(void) {
+    if (runtime_psn_selected()) return;
     pthread_mutex_lock(&s_lock);
     const int start = !s_started && runtime_net_is_online() && getenv("BB_ONLINE_KEYHASH") &&
                       runtime_np_get_online_name() && *runtime_np_get_online_name();
@@ -501,6 +503,7 @@ void runtime_friends_set_hidden(int hidden) {
 }
 
 void runtime_friends_join(const char *host) {
+    if (runtime_psn_selected()) return;
     char name[RF_NAME];
     clean_name(name, host);
     if (name[0]) runtime_invite_join(name);

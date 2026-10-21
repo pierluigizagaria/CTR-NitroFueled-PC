@@ -317,6 +317,7 @@ int32_t runtime_http_add_request_header(int32_t req, const char *name, const cha
  * keyed with the hash of this installation's key for the server (BB_ONLINE_KEYHASH, from
  * run.py), of the time, a nonce, the method and the request target. 0 without a key. */
 int runtime_ryunet_proof(const char *method, const char *target, char *out, size_t out_size) {
+    if (runtime_psn_selected()) return 0;
     const char *key_hash = getenv("BB_ONLINE_KEYHASH");
     if (!key_hash || strlen(key_hash) != 64 || strspn(key_hash, "0123456789abcdef") != 64) return 0;
     static unsigned long long counter;
@@ -342,6 +343,7 @@ int runtime_ryunet_proof(const char *method, const char *target, char *out, size
  * 8-second timeouts: for background threads. */
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size) {
     if (body_size) body[0] = '\0';
+    if (runtime_psn_selected()) return 0;
     const char *host = getenv("BB_ONLINE_SERVER");
     const char *port = getenv("BB_ONLINE_HTTP_PORT");
     if (!host || !*host) return 0;

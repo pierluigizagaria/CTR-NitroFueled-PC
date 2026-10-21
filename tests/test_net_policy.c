@@ -5,6 +5,9 @@
 #include "../src/runtime_net.c"
 #include <assert.h>
 
+/* The socket fixture has no social worker or remote publisher. */
+void runtime_friends_start(void) {}
+
 static void environment(const char *key, const char *value) {
 #ifdef _WIN32
     assert(_putenv_s(key, value ? value : "") == 0);

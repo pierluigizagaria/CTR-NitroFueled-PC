@@ -38,7 +38,7 @@ class SetupTests(unittest.TestCase):
     def setup_external(self):
         with mock.patch.multiple(run, online_key=mock.Mock(side_effect=AssertionError('key access')),
                                  claim_nick=mock.Mock(side_effect=AssertionError('nickname claim')),
-                                 season_theme=mock.Mock(side_effect=AssertionError('theme query'))), \
+                                 server_settings=mock.Mock(side_effect=AssertionError('theme query'))), \
                 contextlib.redirect_stdout(io.StringIO()):
             run.setup_online(self.env, self.config, self.data)
 
@@ -99,14 +99,15 @@ class SetupTests(unittest.TestCase):
         env = {}
         with mock.patch.object(run, 'online_key', return_value='ab' * 32) as key, \
                 mock.patch.object(run, 'claim_nick') as claim, \
-                mock.patch.object(run, 'season_theme', return_value='winter') as theme, \
+                mock.patch.object(run, 'server_settings', return_value={'theme': 'halloween', 'end_race_timeout': 30}) as theme, \
                 contextlib.redirect_stdout(io.StringIO()):
             run.setup_online(env, self.config, self.data)
         key.assert_called_once_with(self.data)
         claim.assert_called_once_with('127.0.0.1', '8090', 'PlayerOne', env['BB_ONLINE_KEYHASH'])
         theme.assert_called_once_with('127.0.0.1', '8090')
         self.assertEqual(env['BB_ONLINE_NAME'], 'PlayerOne')
-        self.assertEqual(env['BB_THEME'], 'winter')
+        self.assertEqual(env['BB_THEME'], 'halloween')
+        self.assertEqual(env['BB_END_RACE_TIMEOUT'], '30')
         self.assertNotIn('BB_ONLINE_TUNNEL', env)
 
     def test_shell_export_clears_identity_without_serializing_backend_capability(self):

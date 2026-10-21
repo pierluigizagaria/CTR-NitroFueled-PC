@@ -22,6 +22,7 @@
 #include <miniz.h>
 #include "bbport_settings.h"
 #include "../../src/runtime_friends.h"
+#include "../../src/runtime_psn.h"
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture: the trophy pictures
 #include "imgui_impl_vulkan.h"
@@ -546,6 +547,11 @@ void ReportSection(const RfView& view, char (&who)[RF_NAME]) {
 }
 
 void FriendsTab() {
+    if (runtime_psn_selected()) {
+        ImGui::TextWrapped("%s", "Your selected platform backend manages friends and invitations. "
+                               "Use the game's online friend list to join a room.");
+        return;
+    }
     static RfView view;
     static unsigned seen = ~0u;
     static char query[RF_NAME] = "";
