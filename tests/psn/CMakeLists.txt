@@ -42,3 +42,12 @@ endif()
 add_test(NAME native-network-offline COMMAND native-net-test --offline)
 add_test(NAME native-network-private-server COMMAND native-net-test)
 set_tests_properties(native-network-offline native-network-private-server PROPERTIES TIMEOUT 20)
+
+# Guest mutex layout is also exercised by build.sh --test on Windows, without a game image.
+add_executable(native-mutex-layout-test test_mutex_layout.c)
+target_include_directories(native-mutex-layout-test PRIVATE ../../src)
+target_compile_options(native-mutex-layout-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+set_target_properties(native-mutex-layout-test PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+target_link_libraries(native-mutex-layout-test PRIVATE Threads::Threads)
+add_test(NAME native-mutex-layout COMMAND native-mutex-layout-test)
+set_tests_properties(native-mutex-layout PROPERTIES TIMEOUT 10)

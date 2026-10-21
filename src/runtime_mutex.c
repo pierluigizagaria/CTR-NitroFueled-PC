@@ -14,7 +14,16 @@ typedef struct { int type; } GuestAttr;
  * object answers EINVAL instead, as the PS4 does for a destroyed id. */
 #define LIVE 0x4d757478u /* "Mutx" */
 #define DEAD 0xdeadbeefu
-typedef struct { pthread_mutex_t native; uint32_t magic; } GuestMutex;
+/* The guest libc writes its mutex flags at handle + 0x20 (OR 0x100). Reserve its
+ * view before the host fields so that write cannot corrupt an adjacent allocation
+ * or the native mutex. Layout fix adapted from Ryu7w7's OCTR commit e2921a9. */
+typedef struct {
+    unsigned char ps4_view[0x100];
+    pthread_mutex_t native;
+    uint32_t magic;
+} GuestMutex;
+_Static_assert(offsetof(GuestMutex, native) >= 0x100,
+               "guest mutex fields must not overlap the native mutex");
 static size_t dead_uses;
 static int dead_use(const char *what) {
     if (__atomic_fetch_add(&dead_uses,1,__ATOMIC_RELAXED)<5) printf("Runtime: %s on a destroyed handle (EINVAL)\n",what);
@@ -59,7 +68,7 @@ static ABI int32_t mutex_init(GuestMutex **out, GuestAttr **attr, const char *na
     if (!out || (attr && !*attr)) return orbis_error(EINVAL);
     int type = attr ? (*attr)->type : 1;
     if (type < 1 || type > 4) return orbis_error(EINVAL);
-    GuestMutex *mutex = malloc(sizeof(*mutex));
+    GuestMutex *mutex = calloc(1, sizeof(*mutex));
     if (!mutex) return orbis_error(ENOMEM);
     pthread_mutexattr_t native_attr;
     int e = pthread_mutexattr_init(&native_attr);
