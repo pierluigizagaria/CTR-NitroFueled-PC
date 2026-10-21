@@ -23,6 +23,7 @@ endif()
 # profile). Covers bbgpu and the static libraries linked into it. No -march: the same build
 # runs on the Steam Deck.
 option(BB_LTO "Link-time optimization of bbgpu" ON)
+option(BB_P2P_DISTRIBUTION "Disable stock updates for an independently released P2P build" OFF)
 set(BB_PGO "off" CACHE STRING "Profile-guided optimization: off, generate, use")
 set(BB_PGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pgo" CACHE PATH "Profile directory")
 if (BB_LTO)
@@ -230,10 +231,14 @@ if (WIN32)
     # The resource scripts embed these files; CMake does not scan .rc includes, so without this
     # a changed icon or manifest kept the old one in the executables.
     set(BB_WIN_RES ${CMAKE_CURRENT_SOURCE_DIR}/../packaging/windows)
+    set(BB_WIN_ICON_DEPENDS "")
+    if (NOT BB_P2P_DISTRIBUTION)
+        set(BB_WIN_ICON_DEPENDS "${BB_WIN_RES}/icons/ctr.ico;")
+    endif()
     set_source_files_properties(${BB_WIN_RES}/sacredfire.rc PROPERTIES
-        OBJECT_DEPENDS "${BB_WIN_RES}/icons/ctr.ico;${BB_WIN_RES}/sacredfire.manifest")
+        OBJECT_DEPENDS "${BB_WIN_ICON_DEPENDS}${BB_WIN_RES}/sacredfire.manifest")
     set_source_files_properties(${BB_WIN_RES}/launcher.rc PROPERTIES
-        OBJECT_DEPENDS "${BB_WIN_RES}/icons/ctr.ico;${BB_WIN_RES}/launcher.manifest")
+        OBJECT_DEPENDS "${BB_WIN_ICON_DEPENDS}${BB_WIN_RES}/launcher.manifest")
     file(GLOB BB_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c)
     file(GLOB BB_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
     add_library(atrac9 STATIC ${BB_ATRAC9})
@@ -243,6 +248,7 @@ if (WIN32)
         ../src/isa_rewrite.c ../src/isa_emulate.c
         ../packaging/windows/sacredfire.rc)
     set_target_properties(sacredfire PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+    target_compile_definitions(sacredfire PRIVATE $<$<BOOL:${BB_P2P_DISTRIBUTION}>:BB_P2P_DISTRIBUTION=1>)
     # isa_emulate runs inside guest code: no XMM/YMM.
     set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
     # Newer clang (MSYS2) warns about write-only counters kept for diagnostics.
@@ -263,7 +269,8 @@ if (WIN32)
         third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
         third_party/imgui/backends/imgui_impl_dx11.cpp ../packaging/windows/launcher.rc)
     target_include_directories(ctr-launcher PRIVATE third_party/imgui third_party/imgui/backends)
-    target_compile_definitions(ctr-launcher PRIVATE UNICODE _UNICODE)
+    target_compile_definitions(ctr-launcher PRIVATE UNICODE _UNICODE
+        $<$<BOOL:${BB_P2P_DISTRIBUTION}>:BB_P2P_DISTRIBUTION=1>)
     target_link_options(ctr-launcher PRIVATE -static -municode -s)
     target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi windowscodecs ole32 shell32 uuid winhttp bcrypt advapi32 ws2_32)
     set_target_properties(ctr-launcher PROPERTIES OUTPUT_NAME CTR-NitroFueled-PC INTERPROCEDURAL_OPTIMIZATION OFF)

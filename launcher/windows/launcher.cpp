@@ -785,6 +785,15 @@ void SyncOnlineBuffers() {
 
 std::string CurrentNick() { return Trim(g_app.game.Get("online_name", g_app.game.Get("user_name"))); }
 
+bool P2pDistribution() {
+#ifdef BB_P2P_DISTRIBUTION
+    return true;
+#else
+    std::error_code ec;
+    return fs::is_regular_file(g_app.root / L"p2p-distribution.json", ec);
+#endif
+}
+
 bool ExternalPsnBackend() {
     // The runtime validates the library and its ABI. Never load it in both launcher and game.
     return GetEnvironmentVariableW(L"BB_PSN_BACKEND", nullptr, 0) > 1;
@@ -4773,6 +4782,7 @@ bool CreateDesktopShortcut(std::string& out_error) {
 /// Steam entry or any other shortcut naming it opens this launcher, and the desktop shortcut
 /// made by the old launcher is made again with the new name.
 void MigrateOldLauncher() {
+    if (P2pDistribution()) return;
     App& a = g_app;
     std::error_code ec;
     const fs::path self = LauncherExe();
@@ -4982,6 +4992,7 @@ void StartUpdateInstall();
 
 /// Asks GitHub for the latest release; with auto_install a newer one is installed at once.
 void StartUpdateCheck(bool auto_install) {
+    if (P2pDistribution()) return;
     if (UpdateBusy()) return;
     if (g_update.worker.joinable()) g_update.worker.join();
     g_update.stage = UpdateState::Checking;
@@ -5016,6 +5027,7 @@ void StartUpdateCheck(bool auto_install) {
 }
 
 void StartUpdateInstall() {
+    if (P2pDistribution()) return;
     App& a = g_app;
     if (g_update.stage != UpdateState::Available && g_update.stage != UpdateState::Dismissed &&
         g_update.stage != UpdateState::Failed)
@@ -5184,6 +5196,11 @@ void UpdateBanner() {
 void UpdateSection() {
     App& a = g_app;
     ImGui::SeparatorText(T("Actualizaciones", "Updates"));
+    if (P2pDistribution()) {
+        ImGui::TextWrapped("%s", T("Actualiza esta compilación P2P desde su página de distribución.",
+                                  "Update this P2P build from its distribution release page."));
+        return;
+    }
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(kGrey, "%s",
                        T("Descarga la última versión publicada en GitHub y la instala encima. Tus ajustes, amigos, apodo, "
@@ -6506,6 +6523,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                               GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
     wc.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
                                                 GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    if (!wc.hIconSm) wc.hIconSm = LoadIconW(nullptr, IDI_APPLICATION);
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
     const int width = int(1120 * scale), height = int(840 * scale);

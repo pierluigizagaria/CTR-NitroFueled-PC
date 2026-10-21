@@ -292,9 +292,17 @@ def parse_version(text):
     return int(m.group(1)), int(m.group(2)), int(m.group(3) or 0), stage
 
 
+def p2p_distribution():
+    """A complete P2P package is updated by its own release channel."""
+    return (PORT / "p2p-distribution.json").is_file()
+
+
 def update_notice(env, version):
     """A release newer than this one: BB_UPDATE_AVAILABLE=<tag>, which the game shows as a notice
     (gpu/shim/bbport_overlay.cpp). Off with BB_UPDATE_CHECK=0; nothing when GitHub does not answer."""
+    if p2p_distribution():
+        env.pop('BB_UPDATE_AVAILABLE', None)
+        return
     have = parse_version(version)
     if env.get('BB_UPDATE_CHECK') == '0' or not have:
         return

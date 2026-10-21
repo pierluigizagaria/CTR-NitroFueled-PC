@@ -35,7 +35,8 @@ LAUNCHER = 'CTR-NitroFueled-PC.exe'
 # Its name in the package (the build keeps the ASCII name above for the toolchain). An update
 # unzipped over an older release leaves CTR-NitroFueled-PC.exe there: the new launcher turns it
 # into a copy of itself and renames the desktop shortcut (launcher.cpp, MigrateOldLauncher).
-PACKAGED_LAUNCHER = 'Crash\u2122 Team Racing Nitro-Fueled.exe'
+PACKAGED_LAUNCHER = (LAUNCHER if os.environ.get('BB_P2P_DISTRIBUTION', '').upper() in ('ON', '1', 'TRUE')
+                     else 'Crash\u2122 Team Racing Nitro-Fueled.exe')
 # The Python that runs run.py and scripts/ (python.org's "embeddable package": no installer, no
 # registry, no PATH). Pinned by version and SHA-256.
 PYTHON_VERSION = '3.14.8'

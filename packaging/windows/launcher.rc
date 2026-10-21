@@ -1,4 +1,6 @@
 // CTR-NitroFueled-PC.exe (launcher/windows): icon and manifest.
 #include <winuser.h>
+#ifndef BB_P2P_DISTRIBUTION
 1 ICON "icons/ctr.ico"
+#endif
 1 RT_MANIFEST "launcher.manifest"

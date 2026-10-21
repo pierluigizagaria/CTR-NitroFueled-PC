@@ -38,7 +38,7 @@ import discord_ipc  # noqa: E402
 import discord_oauth  # noqa: E402
 import ryunet_http  # noqa: E402
 import appimage_update  # noqa: E402
-from run import external_psn_backend  # noqa: E402
+from run import external_psn_backend, p2p_distribution  # noqa: E402
 
 PACKAGED = bool(os.environ.get("BB_PREBUILT"))
 
@@ -1132,6 +1132,9 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def check_update(self, manual=False):
         """Asks GitHub for the latest release in the background; a newer one shows the banner."""
+        if p2p_distribution():
+            self.version_row.set_subtitle(tr("Update this P2P build from its distribution release page."))
+            return
         import threading
         if manual:
             self.version_row.set_subtitle(tr("Checking..."))
@@ -1161,6 +1164,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.update_banner.set_revealed(True)
 
     def on_update(self, _banner):
+        if p2p_distribution():
+            return
         release = getattr(self, "update_release", None)
         appimage = appimage_update.running_appimage()
         if not release:
